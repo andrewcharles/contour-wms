@@ -15,7 +15,7 @@ def index():
 def new():
     
     # url = "http://localhost:8007/?REQUEST=GetMap&source_url=http://localhost:8001/ocean_latest.nc&layers=SSTA&time_index=0&colorscalerange=-10,10&width=800&height=600&bbox=0,-90,360,90&styles=contour&time=Default&palette=jet&color_range=-10,10&n_color=10&format=png"
-    url = "http://localhost:8007/?"
+    url = "http://134.178.23.105:8007/?"
     
     params = {
         "request":"GetMap",
@@ -42,7 +42,7 @@ def new():
 @app.route('/custom')
 def custom():
     
-    url = "http://localhost:8007/?"
+    url = "http://134.178.23.105:8007/?"
     
     params = {
         "request":"GetMap",
@@ -80,4 +80,4 @@ if __name__ == '__main__':
     if len(sys.argv) > 1:
         port = int(sys.argv[1])
     app.debug = True
-    app.run(host='127.0.0.1', port=port)
+    app.run(host='0.0.0.0', port=port)

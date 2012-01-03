@@ -1,10 +1,10 @@
 available = {
-    "image_formats" : ["png", "svg"],
+    "image_formats" : ["png", "svg","gif"],
     "capabilities_formats": ["xml"],
     "version" : "1.3.0",
     "service" : "wms",
     "exception_formats": ["xml"],
-    "requests" : ["GetMap", "GetFullFigure", "GetLegend", "GetCapabilities"],
+    "requests" : ["GetMap", "GetFullFigure", "GetLegend", "GetCapabilities","GetLegendGraphic"],
     "styles": ["grid", "contour", "grid_treshold"],
     "request_methods" : ["GET"]
     }
@@ -54,7 +54,7 @@ service_basic_info = {
 
 contact_info = {
     "person" : {
-        "name" : "Andrew",
+        "name" : "Andrew Charles",
         "organization" : "BOM" },
     "contact_address" : {
         "address_type" : "postal",
@@ -64,7 +64,7 @@ contact_info = {
         "postcode" : "3000",
         "country" : "Australia"},
     "phone" : "+61 XXXX XXXX",
-    "email" : "xyz@bom.gov.au"
+    "email" : "a.charles@bom.gov.au"
     }
 
 data_dir = ""

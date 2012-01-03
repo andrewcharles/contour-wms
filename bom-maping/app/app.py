@@ -18,7 +18,11 @@ def index():
         # FIXME: hack to work around styles parameter conflicts with test client
         if 'plot_styles' in params:
             params['styles'] = [params['plot_styles']]
-        
+       
+        # FIXME: hack to work aroung GetLegend / GetLegendGraphic
+        if params['request'] == 'GetLegendGraphic':
+            params['request'] = 'GetLegend'
+ 
         if params['request'] == 'GetCapabilities':
             defaults = config.capabilities_defaults
         else:
@@ -64,11 +68,11 @@ valid_operations = {
     "GetCapabilities": get_capabilities
     }
 
-#if __name__ == '__main__':
-#    port = 8007
-#    if len(sys.argv) > 1:
-#        port = int(sys.argv[1])
+if __name__ == '__main__':
+    port = 8007
+    if len(sys.argv) > 1:
+        port = int(sys.argv[1])
 #    #TODO remember to turn off before going live
-#    app.debug = True
+    app.debug = True
 #    # app.debug = False
-#    app.run(host='0.0.0.0', port=port)
+    app.run(host='0.0.0.0', port=port)

@@ -12,6 +12,7 @@ def __content_type_format(what, to="content_type"):
 	
 	mapping = {
 		"png" : "image/png",
+		"png" : "image/gif",
 		"svg" : "image/svg+xml",
 		"xml" : "text/xml"
 		}
