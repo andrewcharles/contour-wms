@@ -12,7 +12,7 @@ def __content_type_format(what, to="content_type"):
 	
 	mapping = {
 		"png" : "image/png",
-		"png" : "image/gif",
+		"gif" : "image/gif",
 		"svg" : "image/svg+xml",
 		"xml" : "text/xml"
 		}
@@ -27,14 +27,14 @@ def __content_type_format(what, to="content_type"):
 	    return None
 
 def content_type_for(format):
-	"""
-	returns the conten typet of a given format
-	"""
-	return __content_type_format(format)
+    """
+    returns the conten typet of a given format
+    """
+    return __content_type_format(format)
     
 
 def format_for(content_type):
-	"""
-	returns the format of a given content_type
-	"""
-	return __content_type_format(content_type, "format")
+    """
+    returns the format of a given content_type
+    """
+    return __content_type_format(content_type, "format")

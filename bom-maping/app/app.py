@@ -22,6 +22,10 @@ def index():
         # FIXME: hack to work aroung GetLegend / GetLegendGraphic
         if params['request'] == 'GetLegendGraphic':
             params['request'] = 'GetLegend'
+
+        # FIXME: hack to work aroung gif/png
+        if params['format'] == 'gif':
+            params['format'] = 'png'
  
         if params['request'] == 'GetCapabilities':
             defaults = config.capabilities_defaults
