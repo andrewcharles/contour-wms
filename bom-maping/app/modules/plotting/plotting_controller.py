@@ -53,7 +53,7 @@ from matplotlib.figure import Figure
 from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
 from mpl_toolkits.basemap import Basemap
 from mpl_toolkits.basemap import addcyclic
-from mpl_toolkits.basemap import num2date
+from netCDF4 import num2date
 
 
 # def get_contour(parameters):
@@ -93,7 +93,7 @@ class PlottingController(object):
         self.DPI = 100.0
        
         self.bbox = BBox(parameters["bbox"])
-
+        
         # 1. Retrieve the data
         self.dset = self.__evaluate_datasource_type() (
                                 self.parameters["source_url"], \
@@ -304,7 +304,7 @@ class PlottingController(object):
         cbar = self.fig.colorbar(self.main_render, \
                                  cax=ax, \
                                  extend='both', \
-                                 format='%1.1f' \
+                                 format='%.4g' \
                                  )
                                 
         font_size = 8
@@ -521,7 +521,7 @@ class ParameterValidator(object):
         #TODO: Add values where negative doesnt matter
         
         # check for values that need to be in a list
-        check = { "color_scale_range" : int , \
+        check = { "color_scale_range" : float , \
                   "n_colors" : int }
         for k in check:
             self.__check_list_value(parameters,k,check[k])
