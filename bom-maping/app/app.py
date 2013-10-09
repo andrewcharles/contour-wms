@@ -24,7 +24,7 @@ def index():
             params['request'] = 'GetLegend'
 
         # FIXME: hack to work aroung gif/png
-        if params['format'] == 'gif':
+        if 'format' in params and params['format'] == 'gif':
             params['format'] = 'png'
  
         if params['request'] == 'GetCapabilities':
