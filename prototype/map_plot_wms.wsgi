@@ -13,10 +13,11 @@ FORMAT:	image/png
 HEIGHT:	256
 LAYERS:	netCDF variable name
 NUMCOLORBANDS: 254
-PALETTE: redblue
+PALETTE: redblue or a series of matplotlib readable colors (names or hexcodes)
 REQUEST:	
     GetMap
     GetLegendGraphic
+    GetFeatureInfo
     (GetFullFigure)
 SERVICE: WMS
 STYLES:	boxfill/redblue
@@ -28,9 +29,9 @@ TIMEINDEX: 0
 TRANSPARENT: true
 WIDTH: 256
 
----------------------------------------
-Custom parameters for PASAP application
----------------------------------------
+-----------------
+Custom parameters 
+-----------------
 DAP_URL - location of netcdf file (not full string of dap data request - we don't
 parse the DAP output, we use pydap.)
 
@@ -38,7 +39,16 @@ The REQUEST parameter allows the GetFigure option, which plots a full figure,
 that is, the requested variable, a colour bar and a title all in one image.
 Assumptions are made about the shape of the data: it must be two dimensional.
 
-Requires:
+EXTEND: ['min','max','neither','both']
+COLORBOUNDS: boundary at which colours change (intended for use with manual palette) 
+CBARTICKS: where ticks are drawn on the colorbar
+CBARTICKLABELS: labels for ticks drawn on the colorbar
+MAX_COLOR: Color for values above given range
+MIN_COLOR: Color for values below given range
+
+------------------
+System Requirments
+------------------
    - numpy
    - pydap
    - basemap 
@@ -84,9 +94,12 @@ http://poamaloc/experimental/pasap/cgi-bin/map_plot_wms.py?TRANSPARENT=true&FORM
 
 # Andrew Charles 201012-11
 # Roald de Wit
+# Kay Shelton
+# Elaine Miles
 # Andrew Charles 201101-27
 # Andrew Charles 20110222 -- moving to pydap 3. Allowing full URL to be passed (i.e. to grab
 # a slice from the dap url.)
+# Andrew Charles 20130205 -- made grid and contours consistent, cleaned up some things
 
 """
 
@@ -97,6 +110,7 @@ cgitb.enable()
 import sys
 import os
 import site
+import traceback
 
 # Set up the pythonpath
 for path in os.environ.get('PYTHON_PATH_PASAP','').split(':'):
@@ -104,49 +118,90 @@ for path in os.environ.get('PYTHON_PATH_PASAP','').split(':'):
 
 # Set up a temporary directory for matplotlib    
 os.environ['MPLCONFIGDIR'] = '/tmp/'
-from pydap.client import open_url
 import numpy as np
+from pydap.client import open_url
 from time import strftime, time, strptime
 import datetime
 import numpy as np
 import matplotlib as mpl
 from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
-from mpl_toolkits.basemap import Basemap, addcyclic, date2num, num2date
+from mpl_toolkits.basemap import Basemap, addcyclic
+try:
+    from mpl_toolkits.basemap import date2num, num2date
+except ImportError:
+    from netCDF4 import date2num, num2date
+
 from mpl_toolkits.basemap import interp
 from scipy.interpolate import interpolate
 import StringIO
+from scipy.ndimage import gaussian_filter
 
 # Create a cache for storing data from urls
 cache = {}
 
-def application(environ, start_response):
+# Whether or not to use the cache. Having the cache enabled can cause
+# issues when changing files with the same name in place
+useCache = False
 
+def application(environ, start_response):
     start = time()
+
+    # Only web servers with the DEBUG env var set will get 
+    # to show debugging outpu
+    DEBUG = bool(environ.get('DEBUG', False))
 
     params = cgi.FieldStorage(fp=environ['wsgi.input'], environ=environ)
     download = params.getvalue('DOWNLOAD', False);
-    output = doWMS(params)
 
-    print "Duration: %s" % str(time() - start)
+    # Catch any possible exception
+    try:
+        (output, content_type) = doWMS(params)
+    except Exception, err:
+        output = None
+        errorMessage = str(err) + traceback.format_exc() 
+
+    # For performance testing
+    #print "Duration: %s" % str(time() - start)
+    #print "TYPE:", type(output)
     if output:
         if download:
             filename = "map.png"
             start_response('200 OK', [
                 ('Content-Disposition', 'attachment;filename=%s' % filename),
-                ('Content-Type', 'image/png'),
+                ('Content-Type', content_type),
                 ("Content-length", str(len(output))),
                 ])
         else:
             start_response('200 OK', [
-                ('Content-Type', 'image/png'),
+                ('Content-Type', content_type),
                 ("Content-length", str(len(output))),
                 ])
 
         return [output]
     else:
-        error = "<html><head><title>Sorry</title></head><body><p>" 
-        error += "There was an error and the server was unable to process your request."
-        error += "</p></body></html>"
+        error = "<html><head><title>Sorry</title></head><body>" 
+        error += "<p>There was an error and the server was unable to process your request.</p>"
+        if errorMessage:
+            host = environ.get('HTTP_HOST')
+            uri = environ.get('REQUEST_URI')
+            scriptname = environ.get('SCRIPT_NAME')
+            url = "http://%s%s" % (host, uri)
+            sys.stderr.write('*** ERROR ***\n')
+            sys.stderr.write('* URL: %s\n' % str(url))
+            sys.stderr.write('* MESSAGE: %s\n' % str(errorMessage))
+            if DEBUG:
+                error += "<p><b>Request:</b></p>" 
+                error += "<ul>" 
+                error += "<li><b>Script</b>: http://%s%s</li>" % (cgi.escape(host), cgi.escape(scriptname))
+                error += "</ul>" 
+                error += "<p><b>Params:</b></p>" 
+                error += "<ul>" 
+                for key in params:
+                    param = params.getvalue(key)
+                    error += "<li><b>%s</b>: %s</li>" % (key, cgi.escape(param))
+                error += "</ul>" 
+                error += "<p><b>Error message:</b></p><pre>%s</pre>" % cgi.escape(errorMessage)
+        error += "</body></html>"
         start_response('500 Internal Error', [
             ('Content-Type', 'text/html'),
             ("Content-length", str(len(error))),
@@ -162,6 +217,8 @@ def doWMS(params):
         'http://opendap.bom.gov.au:8080/thredds/dodsC/PASAP/atmos_latest.nc')
     imgwidth = int(params.getvalue('WIDTH',256))
     imgheight = int(params.getvalue('HEIGHT',256))
+    format = params.getvalue('FORMAT', 'image/png')
+    transparent = params.getvalue('TRANSPARENT', "true")
     request = params.getvalue('REQUEST', 'GetMap')
     time = params.getvalue('TIME','Default')
     palette = params.getvalue('PALETTE','jet')
@@ -169,17 +226,60 @@ def doWMS(params):
     ncolors = int(params.getvalue('NCOLORS',7))
     timeindex = params.getvalue('TIMEINDEX','Default')
     colrange_in = params.getvalue('COLORSCALERANGE','auto')
-    # THREDDS allows for the colorscalerange to be set to auto
-    # We do not handle that case currently
-    if colrange_in == 'auto':
-        colrange_in = '-4,4'
-    colorrange = tuple([float(a) for a in colrange_in.rsplit(',')])
+    cbar_ticks = params.getvalue('CBARTICKS',None)
+    cbar_ticklabels = params.getvalue('CBARTICKLABELS',None)
+    colorbounds = params.getvalue('COLORBOUNDS',None)
+    max_color = params.getvalue('MAXCOLOR',None)
+    min_color = params.getvalue('MINCOLOR',None)
+    extend = params.getvalue('EXTEND',None)
+
+    # Cater for relative urls
+    if url.startswith('/'):
+        url = 'http://localhost' + url
+
+    if colorbounds is not None:
+        colorbounds = [float(colr) for colr in colorbounds.split(',')]
+        # If colorbounds is set then we ignore colorrange
+        colorrange = colorbounds[0],colorbounds[len(colorbounds)-1]
+        ncolors = len(colorrange) + 1
+
+    else:
+        # THREDDS allows for the colorscalerange to be set to auto
+        # We do not handle that case currently.
+        if colrange_in == 'auto':
+            colrange_in = '-4,4'
+        colorrange = tuple([float(a) for a in colrange_in.rsplit(',')])
+
+    #if cbar_ticks_in == 'Default':
+    #    interval = float(colorrange[1] - colorrange[0]) / float(ncolors) 
+    #    cbar_ticks =  np.arange(colorrange[0], colorrange[1] + interval*.1, interval).round(1)
+    #    cbar_ticks[cbar_ticks==-0]=0
+    #    cbar_ticks =  ",".join(["%s" % el for el in list(cbar_ticks)])
+
     save_local_img = bool(int(params.getvalue('SAVE_LOCAL',0)))
 
-    # Might be nicer to just pass a dict to mapdap()
-    return mapdap(varname=varname,bbox=bbox,url=url,imgheight=imgheight,imgwidth=imgwidth,
-        request=request,time=time,timeindex=timeindex,save_local_img=save_local_img,
-        colorrange=colorrange,palette=palette,style=style,ncolors=ncolors)
+    #Turn transparent param into a boolean
+    transparent = transparent.lower() == "true"
+
+    # Allow for multiple output formats. Defaults to png
+    valid_formats = ["png", "png8"]
+    format = format.lower().split("/")[-1] # "image/png" -> png, "png" -> "png"
+    if format not in valid_formats:
+        format = "png"
+
+    if request.lower() != "getfeatureinfo":
+        # Might be nicer to just pass a dict to mapdap()
+        output = mapdap(varname=varname,bbox=bbox,url=url,imgheight=imgheight,imgwidth=imgwidth,
+            request=request,time=time,timeindex=timeindex,save_local_img=save_local_img,
+            colorrange=colorrange,palette=palette,style=style,ncolors=ncolors,format=format,transparent=transparent,cbar_ticks=cbar_ticks,cbar_ticklabels=cbar_ticklabels,colorbounds=colorbounds,extend=extend,max_color=max_color,min_color=min_color)
+
+        return (output, "image/png")
+    else:
+        # Initial work on GetFeatureInfo
+        output = '<?xml version="1.0" encoding="UTF-8"?><wfs:FeatureCollection xmlns="http://www.opengis.net/wfs" xmlns:wfs="http://www.opengis.net/wfs" xmlns:opengeo="http://opengeo.org" xmlns:gml="http://www.opengis.net/gml" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://opengeo.org http://demo.opengeo.org:80/geoserver/wfs?service=WFS&amp;version=1.0.0&amp;request=DescribeFeatureType&amp;typeName=opengeo:roads http://www.opengis.net/wfs http://demo.opengeo.org:80/geoserver/schemas/wfs/1.0.0/WFS-basic.xsd"><gml:boundedBy><gml:Box srsName="http://www.opengis.net/gml/srs/epsg.xml#26713"><gml:coordinates xmlns:gml="http://www.opengis.net/gml" decimal="." cs="," ts=" ">591943.9375,4925605 593045.625,4925845</gml:coordinates></gml:Box></gml:boundedBy><gml:featureMember><opengeo:roads fid="roads.90"><opengeo:variable>%s</opengeo:variable><opengeo:value>%s</opengeo:value><opengeo:the_geom><gml:Point srsName="http://www.opengis.net/gml/srs/epsg.xml#26713"><gml:coordinates>190,-30</gml:coordinates></gml:Point></opengeo:the_geom></opengeo:roads></gml:featureMember></wfs:FeatureCollection>'
+
+        output = output % (varname, "dummy")
+        return (output, "text/plain") 
 
 def cmap_discretize(cmap, N):
     """Return a discrete colormap from the continuous colormap cmap.
@@ -217,86 +317,119 @@ def cmap_discretize(cmap, N):
     # Return colormap object.
     return mpl.colors.LinearSegmentedColormap('colormap',cdict,1024)
 
+def read_string_var(dataset,varname):
+    """ Read a string variable via OPEnDAP.
+        The means for doing this varies between implementations.
+        This function is not extensively tested, and may only
+        work for THREDDS.
+    """
+    var = dataset[varname]
+    dims = list(var.dimensions)
+    names = []
+    if 'slen' in dims:
+        # Pydap style response
+        dimdex = dims.index('slen')
+        for i in range(dataset[varname].array.shape[0]):
+            names.append(''.join(dataset[varname].array[i] ))
+    else:
+        # THREDDS style response
+        names = dataset[varname]
+    return(np.array(names))
+
+def cellbounds(ar):
+    """ 
+        Generate bounds from midpoints.
+        ar -- a coordinate array in one dimension
+
+        Returns lower/upper bounds of grid points defined at centres ar
+        Based on code in CDAT. 
+    """
+    
+    leftPoint = np.array([1.5*ar[0]-0.5*ar[1]])
+    midArray = (ar[0:-1]+ar[1:])/2.0
+    rightPoint = np.array([1.5*ar[-1]-0.5*ar[-2]])
+    bnds = np.concatenate((leftPoint,midArray,rightPoint))
+    return bnds
+
 def transform_lons(coords,lon,f):
-        """ Take bounding box longitudes and transform them so that basemap plots sensibly. """
-        """
-        Arguments
-        coords -- a tuple compose of lonmin,lonmax
-        lon -- numpy array of longitudes
-        f -- numpy array of the field being plotted
+    """ Take bounding box longitudes and transform them so that basemap plots sensibly. """
+    """
+    Arguments
+    coords -- a tuple compose of lonmin,lonmax
+    lon -- numpy array of longitudes
+    f -- numpy array of the field being plotted
 
-        >>> trans_coords()
+    >>> trans_coords()
 
-        This logic can probably be simplified as it was built incrementally to solve several
-        display issues. See tests/allplots.shtml for the tests that drove this function.
+    This logic can probably be simplified as it was built incrementally to solve several
+    display issues. See tests/allplots.shtml for the tests that drove this function.
 
-        """
-        x1,x2 = coords
-        lont = lon
-        
-        # To handle 360 degree plots
-        if x2 == x1:
-            x2 = x1 + 360
-       
-        # Basemap doesn't always play well with negative longitudes so convert to 0-360
-        lon2360 = lambda x: ((x + 360.) % 360.)
-        if x2 < 0:
-            x2 = lon2360(x2)
-            x1 = lon2360(x1)
-            lont = lon2360(lont)
+    """
+    x1,x2 = coords
+    lont = lon
+    
+    # To handle 360 degree plots
+    if x2 == x1:
+        x2 = x1 + 360
+   
+    # Basemap doesn't always play well with negative longitudes so convert to 0-360
+    lon2360 = lambda x: ((x + 360.) % 360.)
+    if x2 < 0:
+        x2 = lon2360(x2)
+        x1 = lon2360(x1)
+        lont = lon2360(lont)
 
-        # If this has resulted in xmin greater than xmax, need to reorder
-        if x2 < x1:
-            x2 = x2 + 360
-        
-        # If the start lon is less than zero, then convert to -180:180
-        # It's not clear this will ever be executed, given the above code
-        if (x1 < 0) or (x2 == x1 and x2 == 180):
-            x1 = ((x1 + 180.) % 360.) - 180.
-            x2 = ((x2 + 180.) % 360.) - 180.
-            lont = ((lont + 180.) % 360.) - 180.
+    # If this has resulted in xmin greater than xmax, need to reorder
+    if x2 < x1:
+        x2 = x2 + 360
+    
+    # If the start lon is less than zero, then convert to -180:180
+    # It's not clear this will ever be executed, given the above code
+    if (x1 < 0) or (x2 == x1 and x2 == 180):
+        x1 = ((x1 + 180.) % 360.) - 180.
+        x2 = ((x2 + 180.) % 360.) - 180.
+        lont = ((lont + 180.) % 360.) - 180.
 
-        # If this has resulted in xmin greater than xmax, we need to reorder
-        if x2 < x1:
-            x2 = x2 + 360
+    # If this has resulted in xmin greater than xmax, we need to reorder
+    if x2 < x1:
+        x2 = x2 + 360
 
-        # If the x2 range is greater than 360 (plots that span both dl and pm)
-        # then remap the longitudes to this range
-        if x2 > 360:
-           idx = lont < x1
-           lont[idx] = lont[idx] + 360
-       
-        # Remap the longitudes for this case too
-        if x1 < 0 and x2 > 180:
-           idx = lont < x1
-           lont[idx] = lont[idx] + 360
-       
-        # The special case of 0-360
-        if x2 == x1:
-            if x2 == 0:
-                x1 = 0
-                x2 = 360
-            else:
-                x2 = abs(x2)
-                x1 = -x2
-        
-        coords = x1,x2
-        # Ensure lons are ascending, and shuffle the field with the same indices
-        idx = np.argsort(lont)
-        lont = lont[idx]
-        ft = f[:,idx]
-        ft, lont = addcyclic(ft,lont)
-        return coords,lont,ft
+    # If the x2 range is greater than 360 (plots that span both dl and pm)
+    # then remap the longitudes to this range
+    if x2 > 360:
+       idx = lont < x1
+       lont[idx] = lont[idx] + 360
+   
+    # Remap the longitudes for this case too
+    if x1 < 0 and x2 > 180:
+       idx = lont < x1
+       lont[idx] = lont[idx] + 360
+   
+    # The special case of 0-360
+    if x2 == x1:
+        if x2 == 0:
+            x1 = 0
+            x2 = 360
+        else:
+            x2 = abs(x2)
+            x1 = -x2
+    
+    coords = x1,x2
+    # Ensure lons are ascending, and shuffle the field with the same indices
+    idx = np.argsort(lont)
+    lont = lont[idx]
+    ft = f[:,idx]
+    ft, lont = addcyclic(ft,lont)
+    return coords,lont,ft
 
 def figurePlotDims(imgheight,imgwidth,coords,plot_max_xfrac=0.7,plot_max_yfrac=0.7):
     """
-     Given parameters:
-        imgwidth,imgheight, 
-        coords -- lonmin,latmin,lonmax,latmax,
-        the number of plot lons and lats,
-        the maximum fraction to be taken up by the plot, 
+     Compute a new x and y fraction such that the lat/lon aspect ratio is constant.
+        
+     imgwidth,imgheight, 
+     coords -- lonmin,latmin,lonmax,latmax,
+     the maximum fraction to be taken up by the plot, 
 
-     compute a new x and y fraction such that the lat/lon aspect ratio is constant.
     """
     lonmin,latmin,lonmax,latmax = coords
     plot_max_height=plot_max_yfrac*imgheight
@@ -328,40 +461,132 @@ def figurePlotDims(imgheight,imgwidth,coords,plot_max_xfrac=0.7,plot_max_yfrac=0
 
     return (0.08,0.08,plot_xfrac,plot_yfrac)
 
-def get_pasap_plot_title(dset,
-    varname = 'hr24_prcp',
-    timestep= 0,
-    ):
-    """ Given an open pydap object, and some extra information, return a nice
+def get_pasap_plot_title(dset,varname = 'hr24_prcp',timestep= 0):
+    """ Given an open pydap object (dset), and some extra information, return a nice
         plot title.
     """
     header = "PASAP: Dynamical Seasonal Outlooks for the Pacific."
-    subheader1 = "Outlook based on POAMA 1.5 CGCM adjusted for historical skill"
+    subheader1 = "Outlook based on POAMA 2 CGCM adjusted for historical skill"
     subheader2 = "Experimental outlook for demonstration and research only"
-    time_var = dset['time']
 
-    if 'units' in time_var.attributes.keys():
-        time_units = time_var.attributes['units']
+    if 'time' in dset.keys() and 'init_date' in dset.keys():
+        time_var = dset['time']
+        if 'units' in time_var.attributes.keys():
+            time_units = time_var.attributes['units']
+        else:
+            time_units = ''
+        valid_time = datetime.datetime.strftime(
+            num2date(time_var[timestep],time_units),"%Y%m%d")
+        start_date = datetime.datetime.strftime(
+            num2date(dset['init_date'][0],time_units),"%Y%m%d")
     else:
-        time_units = ''
+        start_date = 'unknown' 
+
     if 'units' in dset[varname].attributes.keys():
         units = dset[varname].attributes['units']
     else:
-        units = ''
-    valid_time = datetime.datetime.strftime(
-        num2date(time_var[timestep],time_units),"%Y%m%d")
-    start_date = datetime.datetime.strftime(
-        num2date(dset['init_date'][0],time_units),"%Y%m%d")
+        units = 'no units provided'
 
-    period_label = str(dset['time_label'][timestep])
+    if 'time_label' in dset.keys():
+        period_label = str(read_string_var(dset,'time_label')[timestep])
+    else:
+        period_label = 'unknown'
     titlestring = header + '\n' \
                   + subheader1 + '\n'  \
                   + subheader2 + '\n'  \
                   + "Variable: " + varname + ' (' + units + ')' + '\n' \
-                  + 'Model initialised ' + start_date + '\n' \
+                  + 'Model initialised: ' + start_date + '\n' \
                   + 'Forecast period: ' + period_label 
 
     return titlestring
+
+def get_plot_title(dset,varname='hr24_prcp',timestep=0):
+    """ Given an open pydap object, and some extra information, return a nice
+        plot title.
+        TODO: This should return as generic a title as possible based only
+        on the dataset metadata with no further assumptions.
+    """
+
+    if 'time' in dset.keys() and 'init_date' in dset.keys():
+        time_var = dset['time']
+        if 'units' in time_var.attributes.keys():
+            time_units = time_var.attributes['units']
+        else:
+            time_units = ''
+        valid_time = datetime.datetime.strftime(
+            num2date(time_var[timestep],time_units),"%Y%m%d")
+        start_date = datetime.datetime.strftime(
+            num2date(dset['init_date'][0],time_units),"%Y%m%d")
+    else:
+        start_date = 'unknown' 
+
+    if 'units' in dset[varname].attributes.keys():
+        units = dset[varname].attributes['units']
+    else:
+        units = ''#no units provided'
+
+    if 'time_label' in dset.keys():
+        period_label = str(read_string_var(dset,'time_label')[timestep])
+        period_label = period_label.replace("\n", ", ")
+    else:
+        period_label = ''
+
+    if 'lead_time' in dset.keys():
+        lead_time = str(read_string_var(dset,'lead_time')[timestep])
+        lead_time_label = ', Lead time: ' + lead_time + ' months'
+        if lead_time == '1':
+            lead_time_label = ', Lead time: ' + lead_time + ' month'
+    else:
+        lead_time_label = ""
+
+    header = "PACCSAP: Dynamical Seasonal Outlooks for the Pacific.\n"
+    subheader1 = "Outlook based on POAMA 2 CGCM adjusted for historical skill.\n"
+    subheader2 = "Experimental outlook for demonstration and research only.\n"
+    titlestring = header + subheader1 +  subheader2 + 'Variable:  ' + varname + '(' + units + ')' + '\n' \
+                  + 'Model initialised: ' + start_date + '\n' + 'Forecast period: ' + period_label \
+                  + lead_time_label
+
+    return titlestring
+
+
+def get_colmap(palette,ncolors,colorbounds=None,colorrange=None,
+    max_color=None,min_color=None):
+    """ Get a colormap and normalise instance.
+
+        palette can be a string list of colors, or the name of a palette
+    # if a colormap could not be found, we assume that palette is a string separating colors
+    # like this: "#996518,#FE0000,#FE6532,#F99634,#FEFE33,#F2F2F2,#FEFEFE,#FEFEFE,#D5D5D5,#CBFECB,#65CB65,#6699FE,#0065FE,#660099"
+    if not colormap:
+
+    """
+    colormap = mpl.cm.get_cmap(palette,ncolors)
+    norm = None
+
+    if not colormap:
+        colormap = mpl.colors.LinearSegmentedColormap.from_list(
+            'custom', palette.split(',')[0:ncolors])
+        
+        if colorbounds is not None:
+            norm = mpl.colors.BoundaryNorm(colorbounds,ncolors=256,clip=False)
+        elif colorrange is not None:
+            norm = mpl.colors.Normalize(vmin=colorrange[0], vmax=colorrange[1], clip=False)
+
+        # At this point, norm has been set, so the last few clauses in the function
+        # will not execute.
+   
+    if max_color is not None: 
+        colormap.set_over(max_color)
+
+    if min_color is not None: 
+        colormap.set_under(min_color)
+    
+    if norm is None and colorbounds is not None:
+        norm = mpl.colors.BoundaryNorm(colorbounds,ncolors=ncolors,clip=False) 
+    elif (norm is None) and (colorbounds is None) and (colorrange is not None):
+        norm = mpl.colors.Normalize(vmin=colorrange[0], vmax=colorrange[1], clip=False)
+
+    return colormap,norm
+
 
 def mapdap(
     varname = 'hr24_prcp',
@@ -371,17 +596,24 @@ def mapdap(
     imgwidth = 256,
     imgheight = 256,
     request = 'GetMap',
+    format = 'png',
+    transparent = True,
     time = 'Default',
     save_local_img = False,
-    colorrange = (-4,4),
+    colorrange = None,#(-4,4),
     palette = 'RdYlGn',
-    colorbounds = 'Default',
+    colorbounds = None,
     style = 'grid',
-    ncolors = 10,
+    ncolors = None,
     mask = -999,
     plot_mask = True,
     mask_varname = 'mask',
-    mask_value = 1.0
+    mask_value = 1.0,
+    cbar_ticks = None,
+    cbar_ticklabels = None,
+    extend = None,
+    max_color = None,
+    min_color = None
     ):
     """ Using Basemap, create a contour plot using some dap available data 
    
@@ -400,50 +632,52 @@ def mapdap(
         if plot_mask is True, mask_varname and mask_value must be given
     
     """
-    transparent = True
     lonmin,latmin,lonmax,latmax = tuple([float(a) for a in bbox.rsplit(',')])
-   
-    # It's not clear there is any point in this. Pydap doesn't actually
+
+    # PART 1: Find the opendap data source and download the variable's data
+ 
+    # It's not clear there is any point in the cache. Pydap doesn't actually
     # download data until you subscript 
-    if url not in cache:
+    if useCache:
+        if url not in cache:
+            dset = open_url(url)
+        else:
+            dset = cache[url]
+    else:
         dset = open_url(url)
-    else:
-        dset = cache[url]
 
-    # Get the correct time.
-    time_var = dset['time']
-    time_units = time_var.attributes['units']
-    available_times = np.array(time_var[:])
-
-    # TODO there is a potential conflict here between time and timeindex.
-    # On the one hand we want to allow using the actual time value.
-    # On the other hand we want to make it easy to get a time index
-    # without knowing the value.
     timestep=0
-    if timeindex == 'Default':
-        timestep=0
+    if 'time' in dset[varname].dimensions and 'time' in dset:
+        # Get the correct time.
+        time_var = dset['time']
+        time_units = time_var.attributes['units']
+        available_times = np.array(time_var[:])
+
+        # TODO there is a potential conflict here between time and timeindex.
+        # On the one hand we want to allow using the actual time value.
+        # On the other hand we want to make it easy to get a time index
+        # without knowing the value.
+        if timeindex == 'Default':
+            timestep=0
+        else:
+            timestep=int(timeindex)
+        if time != 'Default':
+            dtime = datetime.datetime.strptime(time, "%Y-%m-%dT%H:%M:%S" )
+            reftime = date2num(dtime,time_units)
+            timestep = np.where(available_times >= reftime)[0].min()
+
+        # Determine what index is time
+        # TODO Obviously it could be 1,2,3 even 4.
+        if dset[varname].dimensions[2] == 'time':
+            var = dset[varname][:,:,timestep]
+        else:
+            var = dset[varname][timestep,:,:]
     else:
-        timestep=int(timeindex)
-    if time != 'Default':
-        dtime = datetime.datetime.strptime(time, "%Y-%m-%dT%H:%M:%S" )
-        reftime = date2num(dtime,time_units)
-        timestep = np.where(available_times >= reftime)[0].min()
+        var = dset[varname][:,:]
 
-    # TODO Get only the section of the field we need to plot
+    # TODO Get only the section of the field we need to plot (if efficient)
     # TODO Determine lat/lon box indices and only download this slice
-
-    # TODO Set default range (the below does not work)
-    #colorrange = np.min(var),np.max(var)
-    
-    lat = dset['lat'][:]
-    lon = dset['lon'][:]
-    var = dset[varname][timestep,:,:]
- 
-    #xcoords = lonmin,lonmax
-    #xcoords,lon,var = transform_lons(xcoords,lon,var)
- 
-    # TODO
-    # Needs mre thought - the idea here is to only grab a slice of the data
+    # Needs more thought - the idea here is to only grab a slice of the data
     # Need to grab a slightly larger slice of data so that tiling works.
     #lat_idx = (lat > latmin) & (lat < latmax)
     #lon_idx = (lon > lonmin) & (lon < lonmax)
@@ -455,16 +689,46 @@ def mapdap(
     #londx2 = np.where(lon_idx)[0].max()
     #var = var[latdx1:latdx2+1,londx1:londx2+1]
     #var = dset[varname][timestep,latdx1:latdx2+1,londx1:londx2+1]
-
-    # todo clean up this logic
-    if 'mask' in dset.keys():
-        if plot_mask:
-            maskvar = dset['mask'][timestep,:,:]
-            #maskvar = dset['mask'][timestep,latdx1:latdx2+1,londx1:londx2+1]
-            varm = np.ma.masked_array(var,mask=maskvar)
-            mask = varm.mask 
+    # TODO Set default range (the below does not work)
+    
+    if 'lat' in var.dimensions:
+        lat = dset['lat'][:]
+        lon = dset['lon'][:]
     else:
-        varm = np.ma.masked_array(var,mask=np.isinf(var))
+        lat = dset['latitude'][:]
+        lon = dset['longitude'][:]
+ 
+    # Create an array from the pydap returned type. (?)
+    vardata = var[varname][:,:]
+
+    """ Process the masking rules. Preferred approach is to use the 'missing_value' attrib. """
+
+    # First mask any infinities, extremely large values, and NaNs
+    mask_arr = np.isinf(vardata)
+    mask_arr = mask_arr | np.isnan(vardata)
+    #mask_arr = mask_arr | (vardata == -999)
+    mask_arr = mask_arr | (vardata >= 1e30)
+   
+    # Then look to see if a mask variable is defined in the file 
+    # TODO Check that it's a bool!
+    # TODO Deprecate this method (requires adjusting PASAP data outputs)
+    if plot_mask:
+        if 'mask' in dset.keys():
+            if 'time' in dset:
+                maskvar = dset['mask'][timestep,:,:]
+            else:
+                maskvar = dset['mask'][:,:]
+
+            mask_arr = mask_arr | maskvar
+       
+    # Finally look for the missing value attribute
+    try:
+        var_missing_val = var.attributes['missing_value']
+    except KeyError:
+       var_missing_val = ''
+    mask_arr = mask_arr | (vardata == var_missing_val)
+        
+    varm = np.ma.masked_array(vardata,mask=mask_arr)
 
     xcoords = lonmin,lonmax
     # Call the trans_coords function to ensure that basemap is asked to
@@ -473,16 +737,22 @@ def mapdap(
     lonmin,lonmax = xcoords
     varnc = dset[varname]
 
+    # TODO: More special cases could be added here.
     try:
         var_units = varnc.attributes['units']
+        if var_units=='deg C':
+            var_units = u"\u00b0C"
     except KeyError:
        var_units = '' 
 
-    # Plot the data
+    # END PART 1. The data has been obtained
+
+    # PART 2. Set up the Basemap object
+
+    # Note:
     # For the basemap drawing we can't go outside the range of coordinates
     # WMS requires us to give an empty (transparent) image for these spurious lats
-    
-    # uc = upper corner, lc = lower corner
+    # Basemap terminorlogy: uc = upper corner, lc = lower corner
     bmapuclon=lonmax
     bmaplclon=lonmin
     bmapuclat=min(90,latmax)
@@ -522,54 +792,70 @@ def mapdap(
     if request == 'GetFullFigure':
         coords = lonmin,latmin,lonmax,latmax
         plot_coords = figurePlotDims(imgheight,imgwidth,coords)
+        # New line to fix downloaded map
+        # Want islands to appear when map is downloaded
+        # resolution c, l, i, h, f
+        m = Basemap(projection='cyl',resolution='i',area_thresh = 1,urcrnrlon=bmapuclon,
+                    urcrnrlat=bmapuclat,llcrnrlon=bmaplclon,llcrnrlat=bmaplclat,
+                    suppress_ticks=True,fix_aspect=False,ax=ax)
     else:
         plot_coords = (lon_normstart,lat_normstart,ax_xfrac,ax_yfrac)
+    # Commented out, appears to be repeating above statement
+    #    m = Basemap(projection='cyl',resolution='c',urcrnrlon=bmapuclon,
+    #        urcrnrlat=bmapuclat,llcrnrlon=bmaplclon,llcrnrlat=bmaplclat,
+    #        suppress_ticks=True,fix_aspect=False,ax=ax)
 
-    m = Basemap(projection='cyl',resolution='c',urcrnrlon=bmapuclon,
-        urcrnrlat=bmapuclat,llcrnrlon=bmaplclon,llcrnrlat=bmaplclat,
-        suppress_ticks=True,fix_aspect=False,ax=ax)
+    # DONE setting up the Basemap object
 
     ax = fig.add_axes(plot_coords,frameon=False,axisbg='k')
 
     m.ax = ax
-    varm,lonwrap = addcyclic(varm,lon)
-    x,y = m(*np.meshgrid(lonwrap[:],lat[:]))
+    #varm,lonwrap = addcyclic(varm,lon)
+    varm,lonwrap = varm,lon
+    
+    # PART 3: TRICKY COLORBAR LOGIC
 
-    """ To plot custom colors
-    rgb_cmap = mpl.colors.ListedColormap([  
-            (0.0,0.0,0.0),
-            (0.25,0.25,0.25),
-            (0.3,0.25,0.25),
-            (0.5,0.5,0.5),
-            (0.6,0.5,0.5),
-            (0.75,0.75,0.75),
-            (0.75,0.85,0.75),
-            (1.0,1.0,1.0) ],name='rgbcm')
-    default_color_bounds = [-1,-0.75,-0.5,-0.25,0.0,0.25,0.5,0.75,1.0]
-    default_norm = mpl.colors.BoundaryNorm(default_color_bounds, rgb_cmap.N)
-    m.contourf(x,y,var,cmap=rgb_cmap,norm=default_norm)
-    contours = m.contour(x,y,var,cmap=rgb_cmap,norm=default_norm)
-    contours.clabel(colors='k')
-    """
-    colormap = mpl.cm.get_cmap(palette)
-    # colormap = cmap_discretize(colormap,ncolors)
-    # if colorbounds = 'Default':
-    # colorbounds = list(np.arange(colorrange[0],colorrange[1]+increment,increment))
-    # else:
-    #    colorbounds = list(np.arange(colorrange[0],colorrange[1]+increment,increment))
-    #    Do some checks on the size of the list, and fix if we can
-    #    pass
+    if extend is None:
+        extend = 'both'
+
+    if (colorrange == 'auto') or (colorrange is None):
+        colorrange = np.min(var),np.max(var)
+
+    # TODO: delete once tested as this is now impotent
+    if ((extend == 'max') or (extend == 'min')): 
+        if (colorbounds is None):
+            ncolors = ncolors# - 1
+    
+    if colorrange is None and colorbounds is not None:
+        # This is what to do if you get explicit thresholds
+        colorrange = colorbounds[0],colorbounds[-1]
+        if ncolors is None:
+            ncolors = len(colorbounds) + 1
+
+    if colorbounds is None and colorrange is not None:
+        increment = float(colorrange[1]-colorrange[0]) / float(ncolors) 
+        colorbounds = list(np.arange(colorrange[0],colorrange[1]+increment/2.,increment))
+
+    colormap,norm = get_colmap(palette,ncolors,colorbounds=colorbounds,colorrange=colorrange,
+        max_color=max_color,min_color=min_color)
+
+    if cbar_ticks in ["auto", None]:
+        cbar_ticks = colorbounds
+    else:
+        cbar_ticks = [float(ct) for ct in cbar_ticks.split(',')]
+
+    if cbar_ticklabels is not None:
+        cbar_ticklabels = cbar_ticklabels.split(',')
 
     if style == 'contour':
         # Interpolate to a finer resolution
         # TODO: make this sensitive to the chosen domain
-        increment = float(colorrange[1]-colorrange[0]) / float(ncolors-2)
-        colorbounds = list(np.arange(colorrange[0],colorrange[1]+increment,increment))
-        colormap = cmap_discretize(colormap,ncolors)
-        colvs =[-999]+colorbounds+[999]
+
         lat_idx = np.argsort(lat)
         lat = lat[lat_idx]
         varm = varm[lat_idx,:]
+        mask_arr = varm.mask[lat_idx,:]
+        varm = np.ma.masked_array(varm,mask=mask_arr)
 
         data_lonmin = min(lonwrap)
         data_lonmax = max(lonwrap)
@@ -579,35 +865,98 @@ def mapdap(
         new_lons = np.arange(data_lonmin-1.0,data_lonmax+1.0,1.0)
         new_lats = np.arange(data_latmin-1.0,data_latmax+1.0,1.0)
         newx,newy = m(*np.meshgrid(new_lons[:],new_lats[:]))
+        oldx,oldy = m(*np.meshgrid(lonwrap[:],lat[:]))
         x = newx
         y = newy
 
-        # Two pass interpolation to deal with the mask.
-        # The first pass does a bilinear, the next pass does a nearest neighbour to keep the mask
-        # These steps slow down the plotting significantly
-        # It's not clear this is working, and the problem is likely solved by
-        # ensuring the right mask is used!
-        varm_bl = interp(varm, lonwrap[:], lat[:], newx, newy,order=1)
-        varm_nn = interp(varm, lonwrap[:], lat[:], newx, newy,order=0)
-        varm = varm_bl
-        varm[varm_nn.mask == 1] = varm_nn[varm_nn.mask == 1]
+        """
+        Interpolation and Smoothing
+        ---------------------------
+        We need to interpolate the data to a finder grid (this helps with generating
+        less jagged contours), and apply a small amount of smoothing (this helps to 
+        avoid showing model grid boxes.
+ 
+        The existence of a mask complicates this.
 
-        # contourf has an extent keyword (x0,x1,y0,y1)
-        main_render = m.contourf(x,y,varm[:,:],colorbounds,extend='both',cmap=colormap,ax=ax)
-        contours = m.contour(x,y,varm,colorbounds,colors='k',ax=ax)
-        contours.clabel(colors='k',rightside_up=True,fmt='%1.1f',inline=True)
+        We should be able to trust the data's mask variable. But because no physical variables 
+        we plot will be less than -900 we extend the mask here to cover this.
+        
+        When interpolating to the finer grid a two pass interpolation to deal
+        with the mask is used. The first pass does a bilinear, the next pass does a
+        nearest neighbour to ensure points that were masked in the orginal data are
+        masked in the interpolated data.
+
+        """
+
+        maskdata = mask_arr
+        varm_masked = np.ma.masked_array(varm,mask=maskdata)
+        varm_nomask = varm.copy()
+
+        # This code from Stack Overflow, effectively does a nearest neighbour interpolation
+        # to infill the masked regions to avoid the gaussian filter from dragging down
+        # the values of points near the mask.
+        xss = np.arange(-4,4)
+        yss = np.arange(-4,4)
+        neighbours = []
+        
+        for xs in xss:
+            for ys in yss:
+                neighbours.append((xs,ys)) 
+        for hor_shift,vert_shift in neighbours:
+            a_shifted = np.roll(varm_nomask,shift=hor_shift,axis=1)
+            a_shifted = np.roll(a_shifted,shift=vert_shift,axis=0)
+            idx = ~a_shifted.mask * varm_masked.mask
+            varm_nomask[idx] = a_shifted[idx]
+        
+        varm_bl = interp(varm_nomask, lonwrap[:], lat[:], newx, newy,order=1)
+        varm_nn = interp(varm_masked, lonwrap[:], lat[:], newx, newy,order=0)
+
+        # Apply a modest blurring after interpolation to smooth out the
+        # contour lines.
+        varm_gf = gaussian_filter(varm_bl,1.0,mode='wrap')
+        varm = np.ma.masked_array(varm_gf,mask=varm_nn.mask)
+        varm[varm_nn.mask == True] = varm_nn[varm_nn.mask == True]
+        # INTERPOLATION FINISHED
+
+        colmap,norm = get_colmap(palette,ncolors,colorbounds=colorbounds,colorrange=colorrange,
+            max_color=max_color,min_color=min_color)
+        
+        x,y = m(*np.meshgrid(new_lons[:],new_lats[:]))
+
+        main_render = m.contourf(x,y,varm[:,:],colorbounds,extend=extend,
+            cmap=colormap,norm=norm,ax=ax)
+
+        contours = m.contour(x,y,varm,colorbounds,colors='k',ax=ax,linewidths=0.5)
+        contours.clabel(colors='k',rightside_up=True,fmt='%1.1f',inline=True,fontsize=8)
+
     elif style == 'grid':
-        main_render = m.pcolormesh(x,y,varm[:,:],vmin=colorrange[0],vmax=colorrange[1],
-            cmap=colormap,ax=ax)
+        # pcolor thinks it is getting cell edges, not cell centres,
+        # but model data is stored by cell centres
+        # here we calculate the cell edges
+        cbx = cellbounds(lonwrap[:])
+        cby = cellbounds(lat[:])
+        x,y = m(*np.meshgrid(cbx,cby))
+        mask = varm.mask[:,:]
+
+        colmap,norm = get_colmap(palette,ncolors,colorbounds=colorbounds,colorrange=colorrange,
+            max_color=max_color,min_color=min_color)
+
+        main_render = m.pcolormesh(x,y,varm[:,:],shading='flat',norm=norm,
+            vmin=colorrange[0],vmax=colorrange[1],cmap=colormap,ax=ax)
+
     elif style == 'grid_threshold':
-        increment = float(colorrange[1]-colorrange[0]) / float(ncolors)
-        colorbounds = list(np.arange(colorrange[0],colorrange[1]+increment,increment))
-        colornorm = mpl.colors.BoundaryNorm(colorbounds,colormap.N)
-        main_render = m.pcolor(x,y,varm[:,:],vmin=colorrange[0],vmax=colorrange[1],
-            cmap=colormap,ax=ax,norm=colornorm)
+        cbx = cellbounds(lonwrap[:])
+        cby = cellbounds(lat[:])
+        x,y = m(*np.meshgrid(cbx,cby))
+        main_render = m.pcolormesh(x,y,varm[:,:],norm=norm,shading='flat',
+            vmin=colorrange[0],vmax=colorrange[1],cmap=colormap,ax=ax)
+
     else:
-        main_render = m.pcolormesh(x,y,varm[:,:],vmin=colorrange[0],vmax=colorrange[1],
-            cmap=colormap,ax=ax)
+        cbx = cellbounds(lonwrap[:])
+        cby = cellbounds(lat[:])
+        x,y = m(*np.meshgrid(cbx,cby))
+        main_render = m.pcolormesh(x,y,varm[:,:],norm=norm,shading='flat',
+            vmin=colorrange[0],vmax=colorrange[1],cmap=colormap,ax=ax)
         
 
     fig.set_dpi(DPI)
@@ -617,52 +966,72 @@ def mapdap(
     tick_font_size = 8
     if request == 'GetFullFigure':
         # Default - draw 5 meridians and 5 parallels
-        n_merid = 5
+        #n_merid = 5 # this gets worked out dynamically so that lon spacing = lat spacing
         n_para = 5
 
-        # base depends on zoom
-        mint = (lonmax - lonmin)/float(n_merid)
-        base = mint
-        meridians = [lonmin + i*mint for i in range(n_merid)]
+        pint = int((latmax - latmin)/float(n_para))
+        if pint < 1:
+            pint = 1 #minimum spacing is 1 degree
+        base = pint
+        parallels = [latmin + i*pint for i in range(0,n_para+1)] 
+        parallels = [ int(base * round( para / base)) for para in parallels]
+
+        mint = pint
+        n_merid = int((lonmax - lonmin)/float(mint))
+        meridians = [lonmin + i*mint for i in range(0,n_merid+1)]
         meridians = [ int(base * round( merid / base)) for merid in meridians]
         
-        # Some sensible defaults for debugging
-        #meridians = [45,90,135,180,-135,-90,-45]
-
-        pint = int((latmax - latmin)/float(n_para))
-        base = pint
-        parallels = [latmin + i*pint for i in range(1,n_para+1)] 
-        parallels = [ int(base * round( para / base)) for para in parallels]
-        #parallels = [-60,-40,-20,0,20,40,60]
-        #parallels = [((parallel + 180.) % 360.) - 180. for parallel in parallels]
         m.drawcoastlines(ax=ax)
         
         m.drawmeridians(meridians,labels=[0,1,0,1],fmt='%3.1f',fontsize=tick_font_size)
         m.drawparallels(parallels,labels=[1,0,0,0],fmt='%3.1f',fontsize=tick_font_size)
         m.drawparallels([0],linewidth=1,dashes=[1,0],labels=[0,1,1,1],fontsize=tick_font_size)
         titlex,titley = (0.05,0.98)
-        title = get_pasap_plot_title(dset,varname=varname,timestep=timestep)
+        #title = get_pasap_plot_title(dset,varname=varname,timestep=timestep)
+        title = get_plot_title(dset,varname=varname,timestep=timestep)
         fig.text(titlex,titley,title,va='top',fontsize=title_font_size)
    
     colorbar_font_size = 8
+
+    # Determine colorbar text formatting
+    if colorrange[1] > 100:
+        cbar_format = '%4.f'
+    else:
+        cbar_format = '%4.1f'
+
     if request == 'GetLegendGraphic':
         # Currently we make the plot, and then if the legend is asked for
         # we use the plot as the basis for the legend. This is not optimal.
         # Instead we should be making the legend manually. However we need
         # to set up more variables, and ensure there is a sensible min and max.
+
         # See the plot_custom_colors code above
         fig = mpl.figure.Figure(figsize=(64/DPI,256/DPI))
         canvas = FigureCanvas(fig)
         # make some axes
         cax = fig.add_axes([0,0.1,0.2,0.8],axisbg='k')
         # put a legend in the axes
-        cbar = fig.colorbar(main_render,cax=cax,extend='both',format='%1.1f')
+
+        if style == 'contour':
+
+            cbar = fig.colorbar(mappable=main_render,extend=extend,ticks=cbar_ticks,
+                    format=cbar_format,
+                    cax=cax,cmap=colormap,boundaries=colorbounds,spacing='proportional')
+
+        elif style == 'grid':
+
+            # Spacing=proportional does not work. dunno why
+            cbar = fig.colorbar(mappable=main_render,extend=extend,ticks=cbar_ticks,
+                    format=cbar_format,
+                    cax=cax,cmap=colormap,norm=norm)
+
+        if cbar_ticklabels is not None:
+            cbar.ax.set_yticklabels(cbar_ticklabels)
+        
         cbar.set_label(var_units,fontsize=colorbar_font_size)
         for t in cbar.ax.get_yticklabels():
             t.set_fontsize(colorbar_font_size)
-        # i.e. you don't need to plot the figure...
-        #fig.colorbar(filled_contours,cax=cax,norm=colornorm,boundaries=colvs,values=colvs,
-        #   ticks=colorbounds,spacing='proportional')
+
     elif request == 'GetFullFigure':
         # Add the legend to the figure itself.
         # Figure layout parameters
@@ -671,33 +1040,73 @@ def mapdap(
         # First change the plot coordinates so that they do not cover the whole image
         legend_coords = (0.8,0.1,0.02,plot_coords[3])
         cax = fig.add_axes(legend_coords,axisbg='k')
-        cbar = fig.colorbar(main_render,cax=cax,extend='both')
+
+        if style == 'contour':
+            cbar = fig.colorbar(mappable=main_render,extend=extend,ticks=cbar_ticks,
+                        format=cbar_format,
+                        cax=cax,cmap=colormap,
+                        spacing='proportional')
+
+        else:
+            cbar = fig.colorbar(mappable=main_render,extend=extend,ticks=cbar_ticks,
+                    format=cbar_format,
+                    spacing='proportional',
+                    cax=cax,cmap=colormap)
+
+        if cbar_ticklabels is not None:
+            cbar.ax.set_yticklabels(cbar_ticklabels)
+
         for t in cbar.ax.get_yticklabels():
             t.set_fontsize(colorbar_font_size)
         cbar.set_label(var_units,fontsize=colorbar_font_size)
+        
+        #Force transparency. TODO: remove forcing
         transparent=False
-        # Experimenting here with custom color map and ticks. Assigning everything manually
-        # (e.g. ticks=[-2,-1,0,1,2]) is easy. Doing it in an automated way given a range is
-        # hard...
-        #fig.colorbar(filled_contours,cax=cax,boundaries=colvs,ticks=colorbounds)
-        #,norm=colornorm,#boundaries=colvs,values=colvs,        #extend='both')
-           
-    imgdata = StringIO.StringIO()
-    fig.savefig(imgdata,format='png',transparent=transparent)
+
+    #############################################################################
+    # Write the img to disk
+    import tempfile
+    import subprocess
+    img_file_name = tempfile.mkstemp(prefix="map_plot_wms_img_", suffix="." + format)[1]
+    img_file_handle = open(img_file_name, 'w')
+    
+    #For ImageMagick to work fine with Matplotlib on www3, we need to remove transparency
+    #We bring it back in again by using convert: -transparent white (anything white will
+    #become transparent. This may not be the best at all times though.
+    if format == "png8":
+        fig.savefig(img_file_handle,format='png',transparent=False)
+    else:
+        fig.savefig(img_file_handle,format=format,transparent=transparent)
+
+    img_file_handle.close()
+
+    # Convert to PNG8 if requested
+    if format == "png8":
+        if transparent:
+            #IMAGEMAGICK with all whites turned transparent 
+            subprocess.call(["convert", "-transparent", "white", img_file_name, "png8:" + img_file_name])
+        else:
+            #IMAGEMAGICK default 
+            subprocess.call(["convert", img_file_name, "png8:" + img_file_name])
+
+    value = file(img_file_name,"rb").read()
     
     if save_local_img:
-        fig.savefig('map_plot_wms_output.png',format='png')
+        fig.savefig('map_plot_wms_output.' + format,format=format)
         return
 
-    if url not in cache:
+    if useCache and url not in cache:
         cache[url] = dset
 
-    value = imgdata.getvalue()
-
-    #imgdata.close()
     fig = None
 
+    # Remove temp image file
+    os.remove(img_file_name)
+
     return value
+
+
+threddslocal = "http://localhost:8080/thredds/dodsC/PASAP"
 
 def ocean_mask_test():
         params = cgi.FieldStorage()
@@ -705,12 +1114,15 @@ def ocean_mask_test():
             "INVOCATION" : "terminal",
             "SAVE_LOCAL": "1",
             "REQUEST" : "GetFullFigure",
-            "BBOX" : "00,-90,360,90",
+            "BBOX" : "100,-50,180,0",
             "WIDTH" : "640",
             "HEIGHT" : "300",
-            "DAP_URL" : 'http://opendap.bom.gov.au:8080/thredds/dodsC/PASAP/ocean_latest.nc',
-            "LAYER" : 'SSTA',
-            "STYLE" : 'contour'
+            "DAP_URL" : threddslocal + '/ocean_latest.nc',
+            "LAYER" : 'SST',
+            "STYLE" : 'grid',
+            #"STYLE" : 'contour',
+            "COLORSCALERANGE" : '-10,30',
+            "NCOLORS" : '12'
             #"STYLE" : 'grid'
         }.items():
             params.list.append(cgi.MiniFieldStorage(name, value))
@@ -725,9 +1137,12 @@ def atmos_mask_test():
             "BBOX" : "70,-50,180,-5",
             "WIDTH" : "640",
             "HEIGHT" : "300",
-            "DAP_URL" : 'http://opendap.bom.gov.au:8080/thredds/dodsC/PASAP/atmos_latest.nc',
-            "LAYER" : 'hr24_prcp',
-            "STYLE" : 'contour'
+            #"DAP_URL" : 'http://opendap.bom.gov.au:8080/thredds/dodsC/PASAP/atmos_latest.nc',
+            "DAP_URL" : threddslocal + '/iov_atmos_em_latest.nc',
+            "LAYER" : 'hr24_prcpa_nrmse',
+            "STYLE" : 'contour',
+            "NCOLORS" : '12',
+            "COLORSCALERANGE" : '-1.0,1.0'
             #"STYLE" : 'grid'
         }.items():
             params.list.append(cgi.MiniFieldStorage(name, value))
@@ -739,9 +1154,10 @@ if __name__ == '__main__':
         print "Running from terminal"
         os.environ['INVOCATION'] = 'terminal'
 
-        # Some test parameters for debugging
+        #print sys.path
+        #Some test parameters for debugging
         ocean_mask_test()
-        #atmos_mask_test()
+        atmos_mask_test()
 
     elif 'CGI' in os.environ.get('GATEWAY_INTERFACE',''):
         os.environ['INVOCATION'] = 'cgi'
