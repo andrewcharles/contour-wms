@@ -35,6 +35,7 @@ Dependencies:
     * basemap
     * matplotlib
     * flask
+    * netcdf4-python
 
 Installation in CentOS 5.6:
 ===========================

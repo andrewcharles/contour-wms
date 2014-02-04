@@ -22,7 +22,8 @@ import datetime
 import numpy as np
 import matplotlib as mpl
 from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
-from mpl_toolkits.basemap import Basemap, addcyclic, date2num, num2date
+from mpl_toolkits.basemap import Basemap, addcyclic
+from netCDF4 import num2date, date2num
 from mpl_toolkits.basemap import interp
 
 #STUCK can't import this library (in apache)

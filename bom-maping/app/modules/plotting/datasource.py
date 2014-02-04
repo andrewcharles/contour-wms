@@ -103,7 +103,7 @@ class IDataSource(object):
 from pydap.client import open_url
 import numpy as np
 import util.exceptions as ex
-from mpl_toolkits.basemap import NetCDFFile
+from netCDF4 import Dataset as NetCDFFile
 from dap.exceptions import ClientError
 from config import data_dir
 import os
